@@ -15,9 +15,9 @@ CLF_NAMES = ["RandomForest", "ExtraTrees", "SGDClassifier", "RidgeClassifier"]
 
 
 def load_data():
-    features = np.load("data/features_spectral.npy")
-    labels   = np.load("data/labels_spectral.npy")
-    groups   = np.load("data/groups_spectral.npy")
+    features = np.load("data/features_spectral_nonoverlap.npy")
+    labels   = np.load("data/labels_spectral_nonoverlap.npy")
+    groups   = np.load("data/groups_spectral_nonoverlap.npy")
     return features, labels, groups
 
 
@@ -59,23 +59,16 @@ def get_proba_and_preds(clf, clf_name, X):
 
 
 def compute_mia_auc(member_proba, nonmember_proba):
-    """
-    Unified entropy-based MIA — identical signal for all four methods.
-    Signal: raw entropy. Report max(AUC, 1-AUC) for [0.5, 1.0] range.
-    0.5 = indistinguishable. 1.0 = perfectly distinguishable.
-    """
+    """Orientation-invariant separability of R03 and R04 windows."""
     if len(member_proba) == 0 or len(nonmember_proba) == 0:
         return 0.5
-
     member_entropy    = scipy_entropy(member_proba.T)
     nonmember_entropy = scipy_entropy(nonmember_proba.T)
-
     scores = np.concatenate([member_entropy, nonmember_entropy])
     mia_labels = np.concatenate([
         np.ones(len(member_entropy)),
         np.zeros(len(nonmember_entropy))
     ])
-
     try:
         auc = float(roc_auc_score(mia_labels, scores))
         return max(auc, 1.0 - auc)
@@ -91,27 +84,18 @@ def analyze_subject(clf, clf_name, X_target, target_subject):
     top_class      = max(class_counts, key=class_counts.get)
     top_class_frac = class_counts[top_class] / len(preds)
 
-    mean_proba      = proba.mean(axis=0)
-    top_proba_idx   = int(np.argmax(mean_proba))
-    top_proba_class = classes_list[top_proba_idx]
-    top_proba_val   = float(mean_proba[top_proba_idx])
-
+    mean_proba         = proba.mean(axis=0)
     pred_entropy       = float(scipy_entropy(mean_proba))
     max_entropy        = float(np.log(len(classes_list)))
     normalized_entropy = pred_entropy / max_entropy if max_entropy > 0 else 0.0
-
-    correctly_identified = (top_class == target_subject)
 
     return {
         "target_subject":                target_subject,
         "n_test_windows":                int(len(X_target)),
         "top_predicted_class":           top_class,
-        "top_predicted_class_fraction":  float(top_class_frac),
-        "top_proba_class":               top_proba_class,
-        "top_proba_value":               top_proba_val,
         "prediction_entropy_normalized": float(normalized_entropy),
         "consistency":                   float(top_class_frac),
-        "correctly_identified":          bool(correctly_identified),
+        "correctly_identified":          bool(top_class == target_subject),
     }
 
 
@@ -122,18 +106,14 @@ if __name__ == "__main__":
     subjects = sorted(np.unique(labels).tolist())
     n        = len(subjects)
 
-    print(f"Method: Naive Deletion with MIA (upper bound)")
+    print("Method: naive deletion (EEGMMIDB)")
     print(f"Subjects: {n}, Features: {features.shape[1]}")
-    print(f"Classifiers: {CLF_NAMES}")
-    print(f"MIA: raw entropy signal, max(AUC, 1-AUC) — unified across all methods")
-    print(f"NOTE: MIA AUC ~0.5 expected — model knows X so well R03≈R04")
-    print(f"      Real no-forgetting evidence = Correct ID% (~99%)")
+    print(f"Windows: {features.shape[0]}")
 
     r03_mask = np.char.find(groups, "R03") != -1
     r04_mask = np.char.find(groups, "R04") != -1
 
-    # train original models once on all subjects
-    print("\nTraining original models (all subjects, trained once)...")
+    print("\nTraining original models.")
     X_tr = features[r03_mask]
     y_tr = labels[r03_mask]
     X_te = features[r04_mask]
@@ -151,7 +131,6 @@ if __name__ == "__main__":
         print(f"  {clf_name}: {acc:.4f}")
     print(f"Training done ({time.time() - t_start:.1f}s elapsed)")
 
-    # precompute R03 windows per subject
     r03_windows_per_subject = {}
     for s in subjects:
         idx = np.where(r03_mask & (labels == s))[0]
@@ -159,7 +138,7 @@ if __name__ == "__main__":
 
     all_results = {clf_name: [] for clf_name in CLF_NAMES}
 
-    print("\nScoring all subjects against original model...")
+    print("\nScoring all subjects against the original model")
 
     for t_idx, target in enumerate(subjects):
         X_target_r04 = features[r04_mask & (labels == target)]
@@ -171,20 +150,16 @@ if __name__ == "__main__":
         for clf_name in CLF_NAMES:
             clf = original_models[clf_name]
 
-            # metrics on R04 windows
             metrics = analyze_subject(clf, clf_name, X_target_r04, target)
 
-            # MIA: unified 1-entropy signal
             member_proba, _    = get_proba_and_preds(
                 clf, clf_name, X_target_r03)
             nonmember_proba, _ = get_proba_and_preds(
                 clf, clf_name, X_target_r04)
 
-            mia_auc = compute_mia_auc(member_proba, nonmember_proba)
-
             result = {
                 **metrics,
-                "mia_auc":    mia_auc,
+                "mia_auc":    compute_mia_auc(member_proba, nonmember_proba),
                 "classifier": clf_name,
             }
             all_results[clf_name].append(result)
@@ -193,16 +168,16 @@ if __name__ == "__main__":
             print(f"  [{t_idx + 1}/{n}] {target} done "
                   f"({time.time() - t_start:.1f}s elapsed)")
 
-    # summary
+    print("\n" + "=" * 70)
+    print("NAIVE DELETION SUMMARY (EEGMMIDB)")
+    print("=" * 70)
 
-    print("NAIVE DELETION SUMMARY")
-
-    print(f"\nBaseline accuracy:")
+    print("\nBaseline accuracy:")
     for clf_name, acc in baseline_results.items():
         print(f"  {clf_name}: {acc:.4f}")
 
     print(f"\n{'Classifier':<22} {'Consistency':>13} "
-          f"{'Norm Entropy':>14} {'MIA AUC':>10} {'Correct ID%':>12}")
+          f"{'Entropy':>14} {'MIA AUC':>10} {'Correct ID%':>12}")
     print("-" * 75)
 
     for clf_name in CLF_NAMES:
@@ -216,10 +191,10 @@ if __name__ == "__main__":
         print(f"{clf_name:<22} {mc:>13.4f} {me:>14.4f} "
               f"{mia:>10.4f} {cid:>11.1%}")
 
-
-    with open("summary_naive_mia.json", "w") as f:
+    with open("summary_naive_eegmmidb.json", "w") as f:
         json.dump({
             "method":            "naive_deletion",
+            "dataset":           "EEGMMIDB",
             "baseline_accuracy": baseline_results,
             "per_target":        all_results,
         }, f, indent=2)
